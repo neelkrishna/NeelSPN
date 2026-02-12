@@ -7,6 +7,7 @@ A focused sports dashboard that tracks only:
 - Men's Tennis Singles (Grand Slams only)
 - Formula 1 (Mercedes)
 - LA Lakers
+- New York Knicks
 
 ## Features
 

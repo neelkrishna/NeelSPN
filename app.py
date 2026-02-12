@@ -31,6 +31,13 @@ TRACKING_CONFIG = {
         "team_name": "Los Angeles Lakers",
         "odds_sport_key": "basketball_nba",
     },
+    "ny_knicks": {
+        "label": "NY Knicks",
+        "sport": "basketball",
+        "league": "nba",
+        "team_name": "New York Knicks",
+        "odds_sport_key": "basketball_nba",
+    },
     "f1_mercedes": {
         "label": "Formula 1 (Mercedes)",
         "sport": "racing",
@@ -272,7 +279,15 @@ def render_live_odds(label: str, team_name: Optional[str], odds_sport_key: Optio
         st.caption("Not applicable for this tracker.")
         return
 
-    api_key = st.secrets.get("ODDS_API_KEY") or os.getenv("ODDS_API_KEY")
+    api_key = None
+    try:
+        api_key = st.secrets.get("ODDS_API_KEY")
+    except Exception:
+        pass
+
+    if not api_key:
+        api_key = os.getenv("ODDS_API_KEY")
+
     odds = get_live_odds(team_name=team_name, odds_sport_key=odds_sport_key, api_key=api_key)
 
     status = odds.get("status")
@@ -317,7 +332,7 @@ def render_f1_constructor_context() -> None:
 def main() -> None:
     st.set_page_config(page_title="My Sports Tracker", page_icon="🏟️", layout="wide")
     st.title("My Sports Tracker")
-    st.caption("Tracking only: Penguins, Steelers, Men's Grand Slams, Mercedes F1, and LA Lakers")
+    st.caption("Tracking only: Penguins, Steelers, Men's Grand Slams, Mercedes F1, LA Lakers, and NY Knicks")
 
     st.markdown("---")
 
@@ -327,6 +342,7 @@ def main() -> None:
         TRACKING_CONFIG["mens_tennis_slams"]["label"],
         TRACKING_CONFIG["f1_mercedes"]["label"],
         TRACKING_CONFIG["la_lakers"]["label"],
+        TRACKING_CONFIG["ny_knicks"]["label"],
     ])
 
     tab_keys = [
@@ -335,6 +351,7 @@ def main() -> None:
         "mens_tennis_slams",
         "f1_mercedes",
         "la_lakers",
+        "ny_knicks",
     ]
 
     for tab, key in zip(tabs, tab_keys):
