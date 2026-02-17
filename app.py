@@ -160,6 +160,140 @@ def get_events_in_window(sport: str, league: str, start: datetime, end: datetime
     return data.get("events", [])
 
 
+def _normalize_team_name(name: str) -> str:
+    """Normalize team names so ESPN and The Odds API can line up."""
+    cleaned = "".join(ch for ch in (name or "").lower() if ch.isalnum() or ch.isspace())
+    return " ".join(cleaned.split())
+
+
+def _make_matchup_key(away: str, home: str, iso_datetime: Optional[str]) -> str:
+    """Build a stable key for a matchup on a given date."""
+    try:
+        dt = datetime.fromisoformat(iso_datetime.replace("Z", "+00:00")) if iso_datetime else None
+        date_key = dt.date().isoformat() if dt else ""
+    except Exception:
+        date_key = ""
+    return f"{_normalize_team_name(away)}|{_normalize_team_name(home)}|{date_key}"
+
+
+def build_matchup_key_from_espn_event(event: Dict[str, Any]) -> str:
+    """Create a matchup key from an ESPN scoreboard event."""
+    competition = event.get("competitions", [{}])[0]
+    competitors = competition.get("competitors", [])
+    if len(competitors) >= 2:
+        away_obj = next((c for c in competitors if c.get("homeAway") == "away"), competitors[0])
+        home_obj = next((c for c in competitors if c.get("homeAway") == "home"), competitors[1])
+        away = away_obj.get("team", {}).get("displayName", "")
+        home = home_obj.get("team", {}).get("displayName", "")
+    else:
+        away = competitors[0].get("team", {}).get("displayName", "") if competitors else ""
+        home = ""
+    iso_date = event.get("date")
+    return _make_matchup_key(away, home, iso_date)
+
+
+def summarize_odds_for_event(odds_event: Dict[str, Any]) -> Dict[str, str]:
+    """Reduce a The Odds API event into simple display strings."""
+    home = odds_event.get("home_team", "")
+    away = odds_event.get("away_team", "")
+
+    best_home_ml = None
+    best_away_ml = None
+    best_spread = None
+    best_total = None
+
+    for book in odds_event.get("bookmakers", []):
+        for market in book.get("markets", []):
+            key = market.get("key")
+            outcomes = market.get("outcomes", [])
+
+            if key == "h2h":
+                for o in outcomes:
+                    name = o.get("name")
+                    price = o.get("price")
+                    if price is None:
+                        continue
+                    if name == home and best_home_ml is None:
+                        best_home_ml = price
+                    elif name == away and best_away_ml is None:
+                        best_away_ml = price
+
+            elif key == "spreads":
+                for o in outcomes:
+                    if o.get("name") == home:
+                        point = o.get("point")
+                        price = o.get("price")
+                        if price is None:
+                            continue
+                        if best_spread is None:
+                            best_spread = (point, price)
+
+            elif key == "totals":
+                for o in outcomes:
+                    # Prefer the Over leg for a simple summary
+                    if str(o.get("name", "")).lower().startswith("over"):
+                        point = o.get("point")
+                        price = o.get("price")
+                        if price is None:
+                            continue
+                        if best_total is None:
+                            best_total = (point, price)
+
+    summary: Dict[str, str] = {}
+
+    if best_home_ml is not None or best_away_ml is not None:
+        if best_home_ml is not None and best_away_ml is not None:
+            summary["moneyline"] = f"{away} {best_away_ml:+} / {home} {best_home_ml:+}"
+        elif best_home_ml is not None:
+            summary["moneyline"] = f"{home} {best_home_ml:+}"
+        elif best_away_ml is not None:
+            summary["moneyline"] = f"{away} {best_away_ml:+}"
+
+    if best_spread is not None:
+        point, price = best_spread
+        if isinstance(point, (int, float)):
+            summary["spread"] = f"{home} {point:+g} ({price:+})"
+        else:
+            summary["spread"] = f"{home} {point} ({price:+})"
+
+    if best_total is not None:
+        point, price = best_total
+        summary["total"] = f"O/U {point} (O {price:+})"
+
+    return summary
+
+
+@st.cache_data(ttl=120)
+def get_event_odds_map(odds_sport_key: str, api_key: str) -> Dict[str, Dict[str, str]]:
+    """
+    Fetch per-game odds from The Odds API and index them by matchup key.
+
+    We request standard game markets (moneyline, spreads, totals) and then
+    collapse to simple display strings.
+    """
+    url = f"{ODDS_BASE}/sports/{odds_sport_key}/odds"
+    params = {
+        "apiKey": api_key,
+        "regions": "us",
+        "markets": "h2h,spreads,totals",
+        "oddsFormat": "american",
+    }
+    data = fetch_json(url, params=params)
+    if not isinstance(data, list):
+        return {}
+
+    out: Dict[str, Dict[str, str]] = {}
+    for event in data:
+        away = event.get("away_team", "")
+        home = event.get("home_team", "")
+        commence_time = event.get("commence_time")
+        key = _make_matchup_key(away, home, commence_time)
+        summary = summarize_odds_for_event(event)
+        if summary:
+            out[key] = summary
+    return out
+
+
 @st.cache_data(ttl=300)
 def get_news(sport: str, league: str, team_id: Optional[str]) -> List[Dict[str, str]]:
     if team_id:
@@ -233,7 +367,14 @@ def get_live_odds(team_name: str, odds_sport_key: Optional[str], api_key: Option
     return result
 
 
-def render_scores_and_schedule(label: str, sport: str, league: str, team_name: Optional[str], only_grand_slams: bool = False) -> None:
+def render_scores_and_schedule(
+    label: str,
+    sport: str,
+    league: str,
+    team_name: Optional[str],
+    only_grand_slams: bool = False,
+    odds_sport_key: Optional[str] = None,
+) -> None:
     now = datetime.now(timezone.utc)
     past_start = now - timedelta(days=7)
     future_end = now + timedelta(days=14)
@@ -249,8 +390,34 @@ def render_scores_and_schedule(label: str, sport: str, league: str, team_name: O
         st.info("No events found in the current window.")
         return
 
-    rows = [format_event_row(e) for e in events]
+    odds_map: Dict[str, Dict[str, str]] = {}
+    if odds_sport_key:
+        api_key = st.secrets.get("ODDS_API_KEY") or os.getenv("ODDS_API_KEY")
+        if api_key:
+            odds_map = get_event_odds_map(odds_sport_key=odds_sport_key, api_key=api_key)
+        else:
+            st.caption("Add `ODDS_API_KEY` in Streamlit secrets to enable per-game odds.")
+
+    rows: List[Dict[str, Any]] = []
+    any_odds = False
+    for e in events:
+        row = format_event_row(e)
+        if odds_map:
+            matchup_key = build_matchup_key_from_espn_event(e)
+            summary = odds_map.get(matchup_key)
+            if summary:
+                row["Moneyline Odds"] = summary.get("moneyline", "-")
+                row["Spread"] = summary.get("spread", "-")
+                row["Total"] = summary.get("total", "-")
+                any_odds = True
+        rows.append(row)
+
     frame = pd.DataFrame(rows)
+
+    if any_odds:
+        for col in ("Moneyline Odds", "Spread", "Total"):
+            if col in frame.columns:
+                frame[col] = frame[col].fillna("-")
 
     st.subheader("Recent Scores + Upcoming Schedule")
     st.dataframe(frame, use_container_width=True, hide_index=True)
@@ -363,6 +530,7 @@ def main() -> None:
                 league=cfg["league"],
                 team_name=cfg["team_name"],
                 only_grand_slams=(key == "mens_tennis_slams"),
+                odds_sport_key=cfg["odds_sport_key"],
             )
 
             if key == "f1_mercedes":
