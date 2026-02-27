@@ -289,11 +289,17 @@ def render_news(cfg: Dict[str, Any]):
     st.subheader("Latest Headlines")
     team_id = get_team_id(cfg["sport"], cfg["league"], cfg["team_name"]) if cfg["team_name"] else None
     
-    if team_id: url = f"{ESPN_BASE}/{cfg['sport']}/{cfg['league']}/teams/{team_id}/news"
-    else: url = f"{ESPN_BASE}/{cfg['sport']}/{cfg['league']}/news"
+    articles = []
+    if team_id:
+        url = f"{ESPN_BASE}/{cfg['sport']}/{cfg['league']}/teams/{team_id}/news"
+        data = fetch_json(url)
+        articles = data.get("articles", [])
 
-    data = fetch_json(url)
-    articles = data.get("articles", [])
+    # Fallback to league-wide news if team news is empty or not requested
+    if not articles:
+        league_url = f"{ESPN_BASE}/{cfg['sport']}/{cfg['league']}/news"
+        data = fetch_json(league_url)
+        articles = data.get("articles", [])
     
     if not articles:
         st.info("No news headlines available at the moment.")
