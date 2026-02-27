@@ -217,6 +217,79 @@ def get_events_in_window(sport: str, league: str, start: datetime, end: datetime
 
 # --- Utility Functions ---
 
+def _normalize_team_name(name: str) -> str:
+    cleaned = "".join(ch for ch in (name or "").lower() if ch.isalnum() or ch.isspace())
+    return " ".join(cleaned.split())
+
+def _make_matchup_key(away: str, home: str, iso_datetime: Optional[str]) -> str:
+    try:
+        dt = datetime.fromisoformat(iso_datetime.replace("Z", "+00:00")) if iso_datetime else None
+        date_key = dt.date().isoformat() if dt else ""
+    except Exception:
+        date_key = ""
+    return f"{_normalize_team_name(away)}|{_normalize_team_name(home)}|{date_key}"
+
+def build_matchup_key_from_espn_event(event: Dict[str, Any]) -> str:
+    competition = event.get("competitions", [{}])[0]
+    competitors = competition.get("competitors", [])
+    if len(competitors) >= 2:
+        away_obj = next((c for c in competitors if c.get("homeAway") == "away"), competitors[0])
+        home_obj = next((c for c in competitors if c.get("homeAway") == "home"), competitors[1])
+        away = away_obj.get("team", {}).get("displayName", "")
+        home = home_obj.get("team", {}).get("displayName", "")
+    else:
+        away = competitors[0].get("team", {}).get("displayName", "") if competitors else ""
+        home = ""
+    iso_date = event.get("date")
+    return _make_matchup_key(away, home, iso_date)
+
+def summarize_odds_for_event(odds_event: Dict[str, Any]) -> Dict[str, str]:
+    home = odds_event.get("home_team", "")
+    away = odds_event.get("away_team", "")
+    best_home_ml, best_away_ml, best_spread, best_total = None, None, None, None
+
+    for book in odds_event.get("bookmakers", []):
+        for market in book.get("markets", []):
+            key, outcomes = market.get("key"), market.get("outcomes", [])
+            if key == "h2h":
+                for o in outcomes:
+                    name, price = o.get("name"), o.get("price")
+                    if price is None: continue
+                    if name == home: best_home_ml = price
+                    elif name == away: best_away_ml = price
+            elif key == "spreads":
+                for o in outcomes:
+                    if o.get("name") == home:
+                        point, price = o.get("point"), o.get("price")
+                        if price is not None: best_spread = (point, price)
+            elif key == "totals":
+                for o in outcomes:
+                    if str(o.get("name", "")).lower().startswith("over"):
+                        point, price = o.get("point"), o.get("price")
+                        if price is not None: best_total = (point, price)
+
+    summary: Dict[str, str] = {}
+    if best_home_ml is not None and best_away_ml is not None:
+        summary["moneyline"] = f"{best_away_ml:+} / {best_home_ml:+}"
+    if best_spread is not None:
+        summary["spread"] = f"{best_spread[0]:+g} ({best_spread[1]:+})"
+    if best_total is not None:
+        summary["total"] = f"O/U {best_total[0]} ({best_total[1]:+})"
+    return summary
+
+@st.cache_data(ttl=120)
+def get_event_odds_map(odds_sport_key: str, api_key: str) -> Dict[str, Dict[str, str]]:
+    url = f"{ODDS_BASE}/sports/{odds_sport_key}/odds"
+    params = {"apiKey": api_key, "regions": "us", "markets": "h2h,spreads,totals", "oddsFormat": "american"}
+    data = fetch_json(url, params=params)
+    if not isinstance(data, list): return {}
+    out: Dict[str, Dict[str, str]] = {}
+    for event in data:
+        key = _make_matchup_key(event.get("away_team", ""), event.get("home_team", ""), event.get("commence_time"))
+        summary = summarize_odds_for_event(event)
+        if summary: out[key] = summary
+    return out
+
 def format_event_row(event: Dict[str, Any]) -> Dict[str, Any]:
     competition = event.get("competitions", [{}])[0]
     competitors = competition.get("competitors", [])
@@ -269,8 +342,7 @@ def render_header():
 def render_scores_and_schedule(cfg: Dict[str, Any]):
     st.subheader("Recent Scores & Schedule")
     now = datetime.now(timezone.utc)
-    past_start = now - timedelta(days=7)
-    future_end = now + timedelta(days=14)
+    past_start, future_end = now - timedelta(days=7), now + timedelta(days=14)
 
     events = get_events_in_window(cfg["sport"], cfg["league"], past_start, future_end)
     if cfg["team_name"] is None and "mens_tennis_slams" in cfg["label"].lower():
@@ -281,7 +353,22 @@ def render_scores_and_schedule(cfg: Dict[str, Any]):
         st.info("No recent or upcoming events found.")
         return
 
-    rows = [format_event_row(e) for e in events]
+    odds_map, api_key = {}, st.secrets.get("ODDS_API_KEY") or os.getenv("ODDS_API_KEY")
+    if api_key and cfg["odds_sport_key"]:
+        odds_map = get_event_odds_map(cfg["odds_sport_key"], api_key)
+
+    rows = []
+    for e in events:
+        row = format_event_row(e)
+        if odds_map:
+            matchup_key = build_matchup_key_from_espn_event(e)
+            summary = odds_map.get(matchup_key)
+            if summary:
+                row["Moneyline"] = summary.get("moneyline", "-")
+                row["Spread"] = summary.get("spread", "-")
+                row["Total"] = summary.get("total", "-")
+        rows.append(row)
+
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
 
@@ -356,16 +443,17 @@ def get_live_odds_internal(team_name: str, odds_sport_key: str, api_key: str) ->
     data = fetch_json(url, params=params)
     if not isinstance(data, list): return {"status": "Unavailable"}
 
-    target = team_name.lower()
+    target = _normalize_team_name(team_name)
     best_playoff, best_title = None, None
     for event in data:
         for book in event.get("bookmakers", []):
             for market in book.get("markets", []):
                 for outcome in market.get("outcomes", []):
-                    name, desc = str(outcome.get("name", "")).lower(), str(outcome.get("description", "")).lower()
+                    name, desc = _normalize_team_name(outcome.get("name", "")), str(outcome.get("description", "")).lower()
                     price = outcome.get("price")
                     if not price: continue
-                    if target in name:
+                    # Fuzzy match: target in name or name in target
+                    if target in name or name in target:
                         if "playoff" in desc or "make playoffs" in desc:
                             if best_playoff is None: best_playoff = price
                         if "champion" in desc or "win" in desc or "title" in desc or market.get("key") == "outrights":
