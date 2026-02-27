@@ -353,20 +353,25 @@ def render_scores_and_schedule(cfg: Dict[str, Any]):
         st.info("No recent or upcoming events found.")
         return
 
-    odds_map, api_key = {}, st.secrets.get("ODDS_API_KEY") or os.getenv("ODDS_API_KEY")
+    api_key = st.secrets.get("ODDS_API_KEY") or os.getenv("ODDS_API_KEY")
+    odds_map = {}
     if api_key and cfg["odds_sport_key"]:
         odds_map = get_event_odds_map(cfg["odds_sport_key"], api_key)
 
     rows = []
     for e in events:
         row = format_event_row(e)
-        if odds_map:
-            matchup_key = build_matchup_key_from_espn_event(e)
-            summary = odds_map.get(matchup_key)
-            if summary:
-                row["Moneyline"] = summary.get("moneyline", "-")
-                row["Spread"] = summary.get("spread", "-")
-                row["Total"] = summary.get("total", "-")
+        if cfg["odds_sport_key"]:
+            if api_key:
+                matchup_key = build_matchup_key_from_espn_event(e)
+                summary = odds_map.get(matchup_key) if odds_map else None
+                row["Moneyline"] = summary.get("moneyline", "hi cam") if summary else "hi cam"
+                row["Spread"] = summary.get("spread", "hi cam") if summary else "hi cam"
+                row["Total"] = summary.get("total", "hi cam") if summary else "hi cam"
+            else:
+                row["Moneyline"] = "hi cam"
+                row["Spread"] = "hi cam"
+                row["Total"] = "hi cam"
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -482,6 +487,14 @@ def main():
         st.subheader("Data Feeds")
         st.caption("• ESPN Core API")
         st.caption("• The Odds API v4")
+        
+        api_key = st.secrets.get("ODDS_API_KEY") or os.getenv("ODDS_API_KEY")
+        if api_key:
+            st.success("📡 Market Data Connected")
+        else:
+            st.error("🔑 API Key Required")
+            st.caption("hi cam")
+        
         st.caption("• Real-time updates every 2-3 mins")
 
     render_header()
