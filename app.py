@@ -409,12 +409,12 @@ def render_news(cfg: Dict[str, Any]):
 def render_odds_summary(cfg: Dict[str, Any]):
     st.subheader("Market Outlook")
     if not cfg["odds_sport_key"]:
-        st.caption("No odds available for this category.")
+        st.info("hi cam")
         return
 
     api_key = st.secrets.get("ODDS_API_KEY") or os.getenv("ODDS_API_KEY")
     if not api_key:
-        st.warning("Add ODDS_API_KEY to see live market data.")
+        st.info("hi cam")
         return
 
     # For simplicity, we'll use the existing logic but style it
@@ -422,7 +422,7 @@ def render_odds_summary(cfg: Dict[str, Any]):
     odds = get_live_odds_internal(cfg["team_name"], cfg["odds_sport_key"], api_key)
     
     if odds.get("status") != "OK":
-        st.info("Live odds currently unavailable.")
+        st.info("hi cam")
         return
 
     col1, col2 = st.columns(2)
