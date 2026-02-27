@@ -325,8 +325,6 @@ def render_odds_summary(cfg: Dict[str, Any]):
         return
 
     # For simplicity, we'll use the existing logic but style it
-    from app import get_live_odds # self-import or just move logic
-    
     # Redefining briefly for completeness in one file or reuse
     odds = get_live_odds_internal(cfg["team_name"], cfg["odds_sport_key"], api_key)
     
